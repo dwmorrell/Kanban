@@ -11,6 +11,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { runBackup } = require('./scripts/backup-core');
+const { readSheetValues } = require('./scripts/google-sheets-readonly');
+const { mapRowsToTasks, ID_PREFIX: WO_ID_PREFIX } = require('./scripts/workorder-sync');
 
 loadEnv(path.join(__dirname, '.env'));
 
@@ -200,6 +202,43 @@ function scheduleNightlyBackup() {
   setTimeout(() => { run(); setInterval(run, 24 * 60 * 60e3).unref(); }, msUntilNext()).unref();
 }
 scheduleNightlyBackup();
+
+/* ---------- work order sheet sync (read-only; never writes to Google) ---------- */
+function scheduleWorkOrderSync() {
+  const spreadsheetId = process.env.WORKORDER_SHEET_ID;
+  if (!spreadsheetId) return; // off unless explicitly configured
+  const keyFile = process.env.WORKORDER_SHEET_KEY_FILE;
+  if (!keyFile) { console.error('WORKORDER_SHEET_ID is set but WORKORDER_SHEET_KEY_FILE is not; work order sync is off.'); return; }
+  const range = process.env.WORKORDER_SHEET_RANGE || 'Sheet2!A1:K5000';
+  const minutes = Math.max(5, Number(process.env.WORKORDER_SYNC_MINUTES) || 15);
+
+  async function run() {
+    const rows = await readSheetValues({ keyFile, spreadsheetId, range });
+    const { tasks, ids } = mapRowsToTasks(rows);
+
+    let updated = 0;
+    for (const { id, task } of tasks) {
+      const prevRow = q.getDoc.get('tasks', id);
+      const prev = prevRow ? JSON.parse(prevRow.data) : null;
+      const next = prev ? { ...prev, ...task } : { items: [], files: [], links: [], waiting: [], ...task };
+      if (prev && JSON.stringify(prev) === JSON.stringify(next)) continue;
+      q.putDoc.run('tasks', id, JSON.stringify(next), Date.now(), null);
+      broadcast({ type: 'doc', col: 'tasks', id, data: next });
+      updated++;
+    }
+
+    const stale = q.allDocs.all().filter((r) => r.col === 'tasks' && r.id.startsWith(WO_ID_PREFIX) && !ids.has(r.id));
+    for (const r of stale) {
+      q.delDoc.run('tasks', r.id);
+      broadcast({ type: 'doc', col: 'tasks', id: r.id, deleted: true });
+    }
+    console.log(`Work order sheet sync: ${tasks.length} rows seen, ${updated} card(s) created/updated, ${stale.length} removed.`);
+  }
+  const safeRun = () => run().catch((e) => console.error('Work order sheet sync failed:', e.message));
+  safeRun();
+  setInterval(safeRun, minutes * 60e3).unref();
+}
+scheduleWorkOrderSync();
 
 /* ---------- email (optional) ---------- */
 let transport = null, mailChecked = false;

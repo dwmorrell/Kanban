@@ -90,6 +90,23 @@ Nightly backups only protect against mistakes on this machine. Periodically copy
 
 To restore, stop the board and replace `data/eventboard.db` and `data/uploads/` with the copies from a backup.
 
+## Work order sheet sync (optional)
+
+If the crew already logs work orders in a Google Sheet, the board can turn each row into a card on the Tasks board automatically, and keep updating that card whenever the row changes (for example, marking a row Completed in the sheet moves its card to Done). This only ever **reads** the sheet — it is given no permission to change it, and the code path that talks to Google has no write call in it at all.
+
+One manual, one-time setup step is needed, since it involves creating a Google credential:
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), pick or create a project, then enable the **Google Sheets API** for it.
+2. Create a **service account** (IAM & Admin → Service Accounts). It needs no project roles — it will only ever be granted access to one sheet, directly.
+3. Open that service account, go to **Keys → Add key → Create new key → JSON**, and download it.
+4. Save the downloaded file as `data/secrets/workorder-sheet-readonly.json` (that folder is already excluded from backups' upload copy and from git; create it if it doesn't exist).
+5. Open the work order spreadsheet, click **Share**, and share it with the service account's email address (it looks like `something@your-project.iam.gserviceaccount.com`, shown on the service account's page) as a **Viewer**. Do not grant Editor.
+6. In `.env`, set `WORKORDER_SHEET_ID` to the long ID in the sheet's URL (`https://docs.google.com/spreadsheets/d/`**`THIS_PART`**`/edit`), and `WORKORDER_SHEET_KEY_FILE` to the path from step 4. Restart the board.
+
+By default it checks the sheet every 15 minutes (`WORKORDER_SYNC_MINUTES`) and reads the tab/range in `WORKORDER_SHEET_RANGE` (default `Sheet2!A1:K5000` — change this if the work order tab has a different name). It expects the same eleven columns as the source sheet (Status, Item needing repair, report date, Where, Priority, Created by, Assigned to, End date, Notes, Deliverable, Closing Notes) in that order; if the header row doesn't match, it skips that sync cycle and logs a warning rather than guessing.
+
+Checklists, file uploads, links and @ mentions added on the board to a synced card are never touched by a resync — only the fields that come from the sheet (title, column, assignee, due date, room, notes) are kept in sync. If a row is deleted from the sheet, its card is removed from the board.
+
 ## Updating
 
 Download the newer version, keep your `data` folder and `.env`, and run `docker compose up -d --build` again (or `npm install` then restart `npm start`).
@@ -104,6 +121,8 @@ Download the newer version, keep your `data` folder and `.env`, and run `docker 
 | `MAX_UPLOAD_MB` | Largest upload allowed (default 25). |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | Email alerts. Leave `SMTP_HOST` empty to turn them off. |
 | `DATA_DIR` | Where the database and uploads are kept (default `./data`). |
+| `BACKUP_HOUR`, `BACKUP_KEEP` | When the nightly backup runs and how many to keep. See Backups above. |
+| `WORKORDER_SHEET_ID`, `WORKORDER_SHEET_KEY_FILE`, `WORKORDER_SHEET_RANGE`, `WORKORDER_SYNC_MINUTES` | Optional work order sheet sync. See Work order sheet sync above. |
 
 ## Files that can be uploaded
 
@@ -113,5 +132,5 @@ PDF, PNG, JPG, GIF, WebP, plain text, CSV, Markdown and MP4. Save Word documents
 
 - `server.js`: a single Node.js server. It uses Node's built-in SQLite, so there's no database to install. It handles sign-in (passwords are hashed with scrypt; sessions are HttpOnly cookies), the board data, file uploads, live updates (server-sent events) and optional email through `nodemailer`.
 - `public/index.html`: the whole board page, with no build step.
-- `scripts/`: backup and password reset.
+- `scripts/`: backup, password reset, and the optional read-only work order sheet sync.
 - `data/`: created on first run. Not tracked in git.

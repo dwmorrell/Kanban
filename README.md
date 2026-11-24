@@ -92,18 +92,21 @@ To restore, stop the board and replace `data/eventboard.db` and `data/uploads/` 
 
 ## Work order sheet sync (optional)
 
-If the crew already logs work orders in a Google Sheet, the board can turn each row into a card on the Tasks board automatically, and keep updating that card whenever the row changes (for example, marking a row Completed in the sheet moves its card to Done). This only ever **reads** the sheet — it is given no permission to change it, and the code path that talks to Google has no write call in it at all.
+If the crew already logs work orders in a Google Sheet, the board can turn each row into a card on the Tasks board automatically, and keep updating that card whenever the row changes (for example, marking a row Completed in the sheet moves its card to Done). This only ever **reads** the sheet — it is given no permission to change it.
 
-One manual, one-time setup step is needed, since it involves creating a Google credential:
+This works through a small Google Apps Script you deploy yourself from your own Google account. It's free, needs no Google Cloud project, no billing, and no API key — just your existing access to the sheet.
 
-1. In [Google Cloud Console](https://console.cloud.google.com/), pick or create a project, then enable the **Google Sheets API** for it.
-2. Create a **service account** (IAM & Admin → Service Accounts). It needs no project roles — it will only ever be granted access to one sheet, directly.
-3. Open that service account, go to **Keys → Add key → Create new key → JSON**, and download it.
-4. Save the downloaded file as `data/secrets/workorder-sheet-readonly.json` (that folder is already excluded from backups' upload copy and from git; create it if it doesn't exist).
-5. Open the work order spreadsheet, click **Share**, and share it with the service account's email address (it looks like `something@your-project.iam.gserviceaccount.com`, shown on the service account's page) as a **Viewer**. Do not grant Editor.
-6. In `.env`, set `WORKORDER_SHEET_ID` to the long ID in the sheet's URL (`https://docs.google.com/spreadsheets/d/`**`THIS_PART`**`/edit`), and `WORKORDER_SHEET_KEY_FILE` to the path from step 4. Restart the board.
+1. Open the sheet's URL and copy the long ID out of it: `https://docs.google.com/spreadsheets/d/`**`THIS_PART`**`/edit`.
+2. Make up a long random secret (for example, run `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"` anywhere you have Node installed). This stops anyone else who finds the script's URL from reading the sheet through it.
+3. Go to [script.google.com](https://script.google.com/home) and click **New project** (not "Extensions → Apps Script" from inside the sheet itself — a separate, standalone script never gets attached to the spreadsheet file at all).
+4. Delete the placeholder code and paste in the contents of this repo's `scripts/apps-script/workorder-reader.gs`.
+5. Fill in `SHEET_ID` and `SECRET` near the top with the values from steps 1 and 2.
+6. **Deploy → New deployment → type: Web app.** Set **Execute as: Me** and **Who has access: Anyone**, then Deploy. Copy the Web app URL it gives you (it authorizes using your own Google account, with whatever access to the sheet you already have — Viewer is enough).
+7. In `.env`, set `WORKORDER_APPS_SCRIPT_URL` to that URL and `WORKORDER_APPS_SCRIPT_TOKEN` to the secret from step 2. Restart the board.
 
-By default it checks the sheet every 15 minutes (`WORKORDER_SYNC_MINUTES`) and reads the tab/range in `WORKORDER_SHEET_RANGE` (default `Sheet2!A1:K5000` — change this if the work order tab has a different name). It expects the same eleven columns as the source sheet (Status, Item needing repair, report date, Where, Priority, Created by, Assigned to, End date, Notes, Deliverable, Closing Notes) in that order; if the header row doesn't match, it skips that sync cycle and logs a warning rather than guessing.
+"Who has access: Anyone" makes the URL itself reachable by anyone who has it, the same way a webhook is — the secret token is what actually protects it, so keep it as private as a password. If you ever edit the script, use **Deploy → Manage deployments → Edit → New version** to publish the change; saving alone doesn't update the live URL.
+
+By default it checks the sheet every 15 minutes (`WORKORDER_SYNC_MINUTES`) and reads the tab/range in `WORKORDER_SHEET_NAME` / `WORKORDER_SHEET_RANGE` (default `Sheet2` / `A1:K5000` — change these if the work order tab has a different name). It expects the same eleven columns as the source sheet (Status, Item needing repair, report date, Where, Priority, Created by, Assigned to, End date, Notes, Deliverable, Closing Notes) in that order; if the header row doesn't match, it skips that sync cycle and logs a warning rather than guessing.
 
 Checklists, file uploads, links and @ mentions added on the board to a synced card are never touched by a resync — only the fields that come from the sheet (title, column, assignee, due date, room, notes) are kept in sync. If a row is deleted from the sheet, its card is removed from the board.
 
@@ -122,7 +125,7 @@ Download the newer version, keep your `data` folder and `.env`, and run `docker 
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | Email alerts. Leave `SMTP_HOST` empty to turn them off. |
 | `DATA_DIR` | Where the database and uploads are kept (default `./data`). |
 | `BACKUP_HOUR`, `BACKUP_KEEP` | When the nightly backup runs and how many to keep. See Backups above. |
-| `WORKORDER_SHEET_ID`, `WORKORDER_SHEET_KEY_FILE`, `WORKORDER_SHEET_RANGE`, `WORKORDER_SYNC_MINUTES` | Optional work order sheet sync. See Work order sheet sync above. |
+| `WORKORDER_APPS_SCRIPT_URL`, `WORKORDER_APPS_SCRIPT_TOKEN`, `WORKORDER_SHEET_NAME`, `WORKORDER_SHEET_RANGE`, `WORKORDER_SYNC_MINUTES` | Optional work order sheet sync. See Work order sheet sync above. |
 
 ## Files that can be uploaded
 

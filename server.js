@@ -11,7 +11,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { runBackup } = require('./scripts/backup-core');
-const { readSheetValues } = require('./scripts/google-sheets-readonly');
+const { readSheetValues } = require('./scripts/apps-script-client');
 const { mapRowsToTasks, ID_PREFIX: WO_ID_PREFIX } = require('./scripts/workorder-sync');
 
 loadEnv(path.join(__dirname, '.env'));
@@ -203,17 +203,18 @@ function scheduleNightlyBackup() {
 }
 scheduleNightlyBackup();
 
-/* ---------- work order sheet sync (read-only; never writes to Google) ---------- */
+/* ---------- work order sheet sync (read-only; via a Apps Script Web App) ---------- */
 function scheduleWorkOrderSync() {
-  const spreadsheetId = process.env.WORKORDER_SHEET_ID;
-  if (!spreadsheetId) return; // off unless explicitly configured
-  const keyFile = process.env.WORKORDER_SHEET_KEY_FILE;
-  if (!keyFile) { console.error('WORKORDER_SHEET_ID is set but WORKORDER_SHEET_KEY_FILE is not; work order sync is off.'); return; }
-  const range = process.env.WORKORDER_SHEET_RANGE || 'Sheet2!A1:K5000';
+  const url = process.env.WORKORDER_APPS_SCRIPT_URL;
+  if (!url) return; // off unless explicitly configured
+  const token = process.env.WORKORDER_APPS_SCRIPT_TOKEN;
+  if (!token) { console.error('WORKORDER_APPS_SCRIPT_URL is set but WORKORDER_APPS_SCRIPT_TOKEN is not; work order sync is off.'); return; }
+  const sheet = process.env.WORKORDER_SHEET_NAME || undefined;
+  const range = process.env.WORKORDER_SHEET_RANGE || undefined;
   const minutes = Math.max(5, Number(process.env.WORKORDER_SYNC_MINUTES) || 15);
 
   async function run() {
-    const rows = await readSheetValues({ keyFile, spreadsheetId, range });
+    const rows = await readSheetValues({ url, token, sheet, range });
     const { tasks, ids } = mapRowsToTasks(rows);
 
     let updated = 0;

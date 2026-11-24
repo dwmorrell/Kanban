@@ -82,7 +82,11 @@ Without email, people still see their requests under **Waiting on me** when they
 
 ## Backups
 
-Run `npm run backup` (with Docker: `docker compose exec eventboard node scripts/backup.js`). It writes a dated copy of the database and all uploaded files to `data/backups/`. It's safe to run while the board is in use. Copy those backups somewhere off the machine, such as a USB drive or cloud storage.
+The board backs itself up automatically every night (3am server time by default) with no cron job or Task Scheduler entry to set up — it writes a dated copy of the database and all uploaded files to `data/backups/`, and keeps the most recent 14 by default, deleting older ones. Change the time or how many are kept with `BACKUP_HOUR` and `BACKUP_KEEP` in `.env` (see `.env.example`).
+
+You can still run a backup on demand with `npm run backup` (with Docker: `docker compose exec eventboard node scripts/backup.js`). It's safe to run while the board is in use.
+
+Nightly backups only protect against mistakes on this machine. Periodically copy `data/backups/` somewhere off the machine too, such as a USB drive or cloud storage, in case the machine itself is lost or damaged.
 
 To restore, stop the board and replace `data/eventboard.db` and `data/uploads/` with the copies from a backup.
 

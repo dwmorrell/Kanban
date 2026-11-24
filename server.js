@@ -10,6 +10,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const { runBackup } = require('./scripts/backup-core');
 
 loadEnv(path.join(__dirname, '.env'));
 
@@ -180,6 +181,25 @@ function broadcast(event) {
 }
 setInterval(() => { for (const s of streams) s.res.write(': ping\n\n'); }, 25e3).unref();
 setInterval(() => { q.purgeSessions.run(Date.now()); loginAttempts.clear(); }, 60 * 60e3).unref();
+
+/* ---------- nightly backup ---------- */
+function scheduleNightlyBackup() {
+  const h = Number(process.env.BACKUP_HOUR);
+  const hour = Number.isFinite(h) ? Math.min(23, Math.max(0, h)) : 3;
+  const keep = Number(process.env.BACKUP_KEEP) || 14;
+  const run = () => {
+    try { console.log(`Nightly backup saved to ${runBackup({ dataDir: DATA_DIR, keep })}`); }
+    catch (e) { console.error('Nightly backup failed:', e.message); }
+  };
+  const msUntilNext = () => {
+    const next = new Date();
+    next.setHours(hour, 0, 0, 0);
+    if (next <= new Date()) next.setDate(next.getDate() + 1);
+    return next - Date.now();
+  };
+  setTimeout(() => { run(); setInterval(run, 24 * 60 * 60e3).unref(); }, msUntilNext()).unref();
+}
+scheduleNightlyBackup();
 
 /* ---------- email (optional) ---------- */
 let transport = null, mailChecked = false;

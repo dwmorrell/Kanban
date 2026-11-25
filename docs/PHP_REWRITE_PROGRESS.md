@@ -8,9 +8,13 @@ item, implementing it, checking it off, committing, and pushing. If a run
 gets interrupted partway through an item, leave it unchecked and the next
 run will redo/finish it rather than skipping ahead.
 
-- [ ] 1. `lib/db.php` + MySQL schema (users, sessions, docs, files, login_attempts)
+- [x] 1. `lib/db.php` + MySQL schema (users, sessions, docs, files, login_attempts)
 - [ ] 2. `lib/auth.php` (DB-backed sessions, password_hash/verify, rate limiting)
 - [ ] 3. `api.php` routing + core CRUD endpoints (`/api/status`, `/api/state`, `/api/docs/{col}/{id}`, `/api/changes`)
+  - Note for whoever builds this: `public_html/lib/db.php` already makes `docs.data` nullable and treats
+    a NULL-data row as a tombstone (soft delete). Use `Q::delDoc()` (not a hard DELETE) so deletions can
+    be reported, use `Q::allDocs()`/`Q::getDoc()` for live state (they already filter tombstones out),
+    and `Q::docsSince($ms)` for the `/api/changes` query (returns `data === null` for deletions).
 - [ ] 4. Auth/admin endpoints (`/api/setup`, `/api/login`, `/api/logout`, `/api/password`, `/api/me`, `/api/users`, `/api/test-email`)
 - [ ] 5. File upload/download endpoints (`POST /api/files`, `GET /_blob/{id}`)
 - [ ] 6. `public_html/index.html`: swap EventSource for polling (`/api/changes?since=`)

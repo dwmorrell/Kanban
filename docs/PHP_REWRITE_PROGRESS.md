@@ -9,7 +9,13 @@ gets interrupted partway through an item, leave it unchecked and the next
 run will redo/finish it rather than skipping ahead.
 
 - [x] 1. `lib/db.php` + MySQL schema (users, sessions, docs, files, login_attempts)
-- [ ] 2. `lib/auth.php` (DB-backed sessions, password_hash/verify, rate limiting)
+- [x] 2. `lib/auth.php` (DB-backed sessions, password_hash/verify, rate limiting)
+  - Note for whoever builds item 3/4: `require_user()`/`require_admin()` throw `ApiError`
+    (status + apiCode + message) on auth failure — the route dispatcher in `api.php`
+    should catch `ApiError` and turn it into a JSON error response (mirrors server.js's
+    top-level `fail()` catch). `start_session()`/`end_session()` already set/clear the
+    `eb_session` cookie; call them from `/api/setup`, `/api/login`, `/api/logout`.
+    `rate_limit()` call before checking credentials in `/api/login` and `/api/password`.
 - [ ] 3. `api.php` routing + core CRUD endpoints (`/api/status`, `/api/state`, `/api/docs/{col}/{id}`, `/api/changes`)
   - Note for whoever builds this: `public_html/lib/db.php` already makes `docs.data` nullable and treats
     a NULL-data row as a tombstone (soft delete). Use `Q::delDoc()` (not a hard DELETE) so deletions can

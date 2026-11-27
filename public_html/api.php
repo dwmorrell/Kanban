@@ -19,6 +19,24 @@ require_once __DIR__ . '/lib/http.php';
 require_once __DIR__ . '/lib/mailer.php';
 
 const COLLECTIONS = ['shows', 'tasks', 'config'];
+const FILE_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+    'text/plain', 'text/csv', 'text/markdown', 'video/mp4'];
+
+/** Where uploaded blobs live on disk. Created on first use if missing. */
+function upload_dir(): string
+{
+    $dir = defined('UPLOAD_DIR') ? UPLOAD_DIR : (__DIR__ . '/private/uploads');
+    if (!is_dir($dir)) {
+        mkdir($dir, 0755, true);
+    }
+    return $dir;
+}
+
+function max_upload_bytes(): int
+{
+    $mb = defined('MAX_UPLOAD_MB') ? (int) MAX_UPLOAD_MB : 25;
+    return $mb * 1024 * 1024;
+}
 
 /** @throws ApiError 404 not_found / 400 invalid_argument */
 function check_doc_path(string $col, string $id): void
@@ -254,6 +272,72 @@ $router->add('DELETE', '/api/users/:id', function (array $params, ?array $me): v
     // No broadcast needed here either — see the /api/me handler's comment above.
     send_json(200, ['users' => user_payload()]);
 }, 'admin');
+
+/* ---------- files ---------- */
+
+$router->add('POST', '/api/files', function (array $params, ?array $user): void {
+    // The browser sends the file as the raw request body (not multipart
+    // $_FILES), with the real MIME type and original filename in headers —
+    // matches server.js's POST /api/files exactly (see assets.upload() in
+    // public/index.html). $_SERVER['CONTENT_TYPE'] reflects the request's
+    // actual Content-Type header, same thing Node reads off req.headers.
+    $type = strtolower(trim(explode(';', (string) ($_SERVER['CONTENT_TYPE'] ?? ''))[0]));
+    if (!in_array($type, FILE_TYPES, true)) {
+        throw new ApiError(415, 'unsupported_type', 'That file type is not allowed. Use PDF, images, text or MP4.');
+    }
+    $rawName = (string) ($_SERVER['HTTP_X_FILENAME'] ?? 'file');
+    $name = rawurldecode($rawName);
+    if ($name === '') {
+        $name = 'file';
+    }
+    // Strip path separators and control characters, same set server.js's
+    // name.replace(/[\\/\r\n"\x00-\x1f]/g, '_') strips.
+    $name = preg_replace('#[\\\\/\r\n"\x00-\x1f]#', '_', $name);
+    $name = substr($name, 0, 200);
+    if ($name === '') {
+        $name = 'file';
+    }
+    // Reuses read_raw_body() (lib/http.php) rather than read_json_body()/
+    // read_json_doc() — the uploaded bytes aren't JSON.
+    $body = read_raw_body(max_upload_bytes());
+    if ($body === '') {
+        throw new ApiError(400, 'invalid_request', 'That file is empty.');
+    }
+    $id = new_id();
+    file_put_contents(upload_dir() . '/' . $id, $body);
+    Q::addFile($id, $name, $type, strlen($body), now_ms(), $user['id']);
+    send_json(200, ['id' => $id, 'url' => "/_blob/$id", 'sizeBytes' => strlen($body), 'contentType' => $type]);
+}, 'user');
+
+$router->add('GET', '/_blob/:id', function (array $params, ?array $user): void {
+    $id = $params['id'];
+    // Matches files.id's CHAR(32) hex format — also doubles as a path-
+    // traversal guard, since this value becomes part of a filesystem path.
+    $f = preg_match('/^[0-9a-f]{32}$/', $id) ? Q::getFile($id) : null;
+    $path = $f !== null ? upload_dir() . '/' . $f['id'] : null;
+    if ($f === null || !is_file($path)) {
+        throw new ApiError(404, 'not_found', 'That file is no longer here.');
+    }
+    http_response_code(200);
+    header('Content-Type: ' . $f['type']);
+    header('Content-Length: ' . (string) filesize($path));
+    header("Content-Disposition: inline; filename*=UTF-8''" . rawurlencode($f['name']));
+    header('Cache-Control: private, max-age=86400');
+    readfile($path);
+}, 'user');
+
+$router->add('DELETE', '/api/files/:id', function (array $params, ?array $user): void {
+    $id = $params['id'];
+    if (!preg_match('/^[0-9a-f]{32}$/', $id)) {
+        throw new ApiError(400, 'invalid_request', 'Invalid file id.');
+    }
+    $f = Q::getFile($id);
+    if ($f !== null) {
+        Q::delFile($id);
+        @unlink(upload_dir() . '/' . $id);
+    }
+    send_json(200, ['deleted' => $f !== null]);
+}, 'user');
 
 $router->add('POST', '/api/test-email', function (array $params, ?array $user): void {
     if (!mail_enabled()) {

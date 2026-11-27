@@ -80,7 +80,18 @@ run will redo/finish it rather than skipping ahead.
     ready to use; nothing new needed there. The upload endpoint's raw-request-body handling should reuse
     `read_raw_body()` from `lib/http.php` (same size-limit enforcement pattern as `read_json_doc()`), not
     `read_json_body()`/`read_json_doc()` (the uploaded bytes aren't JSON).
-- [ ] 5. File upload/download endpoints (`POST /api/files`, `GET /_blob/{id}`)
+- [x] 5. File upload/download endpoints (`POST /api/files`, `GET /_blob/{id}`)
+  - `GET /_blob/:id` requires auth (`'user'`) — same as server.js's version. Easy to miss since it's not under
+    `/api/`, so the CSRF header check in `run_api()` doesn't apply to it either way (it's a GET), but the
+    *auth* requirement is separate from that and still applies — don't register this route without an auth
+    level if you ever touch it.
+  - Upload reads the raw request body via `read_raw_body()` (`lib/http.php`), not `read_json_body()`/
+    `read_json_doc()` — the bytes aren't JSON. MIME type comes from `$_SERVER['CONTENT_TYPE']`, filename from
+    `$_SERVER['HTTP_X_FILENAME']` (urldecoded, then stripped of path separators/control chars, capped at 200
+    chars) — mirrors server.js's header reads exactly.
+  - `upload_dir()`/`max_upload_bytes()` (top of `api.php`) read `UPLOAD_DIR`/`MAX_UPLOAD_MB` constants with
+    fallback defaults (`public_html/private/uploads`, 25MB) since `config.php` doesn't exist until item 8 —
+    once it does, define those constants there rather than changing these functions.
 - [ ] 6. `public_html/index.html`: swap EventSource for polling (`/api/changes?since=`)
 - [ ] 7. Cron scripts: `scripts/backup.php`, `scripts/workorder_sync.php`, `scripts/reset_password.php`
 - [ ] 8. `config.sample.php`, `.htaccess` files, deployment README section

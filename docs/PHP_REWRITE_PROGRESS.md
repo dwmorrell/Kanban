@@ -16,11 +16,35 @@ run will redo/finish it rather than skipping ahead.
     top-level `fail()` catch). `start_session()`/`end_session()` already set/clear the
     `eb_session` cookie; call them from `/api/setup`, `/api/login`, `/api/logout`.
     `rate_limit()` call before checking credentials in `/api/login` and `/api/password`.
-- [ ] 3. `api.php` routing + core CRUD endpoints (`/api/status`, `/api/state`, `/api/docs/{col}/{id}`, `/api/changes`)
-  - Note for whoever builds this: `public_html/lib/db.php` already makes `docs.data` nullable and treats
-    a NULL-data row as a tombstone (soft delete). Use `Q::delDoc()` (not a hard DELETE) so deletions can
-    be reported, use `Q::allDocs()`/`Q::getDoc()` for live state (they already filter tombstones out),
-    and `Q::docsSince($ms)` for the `/api/changes` query (returns `data === null` for deletions).
+- [x] 3. `api.php` routing + core CRUD endpoints (`/api/status`, `/api/state`, `/api/docs/{col}/{id}`, `/api/changes`)
+  - Note for whoever builds item 4/5: `public_html/lib/http.php` has the `Router`/`run_api()` dispatcher,
+    `read_json_body()` (assoc array, for reading a few scalar fields out of a body — login/setup/password/
+    user edits), `read_json_doc()` (object-mode round trip, for storing a whole doc body verbatim-shaped),
+    and `decode_doc_data()` (object-mode decode, for re-emitting a stored doc in a JSON response). Register
+    new routes on the same `$router` in `api.php` with `$router->add(METHOD, pattern, handler, authLevel)`
+    (`authLevel` is `null`, `'user'`, or `'admin'`); call `run_api($router)` only once, at the bottom, after
+    all routes are registered.
+  - Pitfall already hit and fixed here, worth knowing before adding more JSON-body-returning endpoints:
+    `json_decode($x, true)` (assoc mode) cannot distinguish a JSON `{}` from `[]`, and an assoc array keyed
+    by numeric-looking ids (e.g. doc id `"0"`) can silently re-encode as a JSON array instead of an object.
+    Only use assoc mode for bodies you'll read a few fields out of and never re-serialize whole; anything
+    that gets echoed back (a stored doc, a map keyed by arbitrary id) must decode in object mode
+    (`json_decode($x)`, stdClass for objects) the way `read_json_doc()`/`decode_doc_data()` do, and a
+    map-by-id must be built as `(object) [...]`/`$obj->{$key} = ...`, not a plain assoc array — see
+    `/api/state`'s `$docs` construction in `api.php` for the pattern. Verified against a real MariaDB
+    instance (installed in-sandbox for this run) with ids `"0"`/`"1"` and an empty-object doc.
+  - Also fixed: route `:param` segments are decoded individually, after matching (mirrors server.js's
+    `decodeURIComponent(v)` on each captured group), not by decoding the whole request path up front —
+    otherwise a literal `%2F` inside an id would be decoded into a path separator before routing even runs,
+    changing which route matches (and the error code) instead of reaching `check_doc_path()`'s validation.
+  - Deferred to item 4 on purpose: server.js's `notifyChanges()` (email alerts after a doc PUT) isn't wired
+    into the `PUT /api/docs/:col/:id` handler yet, since it needs a mailer that doesn't exist until
+    `/api/test-email` and PHP's `mail()` are built. `api.php`'s file header has a note; wire it in as a
+    fire-and-forget call after `send_json()`, same as server.js does, once the mailer exists.
+  - `mail_enabled()` in `api.php` (backing the `mail` field in `/api/status`/`/api/state`) currently always
+    returns `false` unless a `MAIL_ENABLED` constant is defined truthy in `config.php` — there's no such
+    constant yet (config.sample.php is item 8). Revisit once item 4/8 settle on how mail readiness is
+    actually signaled.
 - [ ] 4. Auth/admin endpoints (`/api/setup`, `/api/login`, `/api/logout`, `/api/password`, `/api/me`, `/api/users`, `/api/test-email`)
 - [ ] 5. File upload/download endpoints (`POST /api/files`, `GET /_blob/{id}`)
 - [ ] 6. `public_html/index.html`: swap EventSource for polling (`/api/changes?since=`)

@@ -117,6 +117,24 @@ function send_json(int $status, mixed $body): void
     echo json_encode($body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 }
 
+/**
+ * Flushes the response to the client and closes the connection, while this
+ * script keeps running — the PHP equivalent of "respond now, then do a bit
+ * of fire-and-forget work" (e.g. a doc PUT's email notification). Unlike
+ * Node, plain PHP normally buffers the whole response until the script
+ * ends, so skipping this would make every such request wait on mail() too.
+ * Only available under PHP-FPM; under mod_php/suPHP (still common on some
+ * shared hosting) this is a no-op and the request does wait on the
+ * fire-and-forget work — harmless (mail_enabled() defaults to off, so this
+ * never fires in that case unless mail alerts are turned on), just slower.
+ */
+function finish_response(): void
+{
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();
+    }
+}
+
 function send_error(Throwable $e): void
 {
     if ($e instanceof ApiError) {

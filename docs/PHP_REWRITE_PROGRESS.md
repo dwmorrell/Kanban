@@ -59,7 +59,27 @@ run will redo/finish it rather than skipping ahead.
     **If you are building item 6 (the frontend poll loop): use the `cursor` field from `/api/state` to seed
     the first poll, and the `cursor` field from each `/api/changes` response to advance it. Do not use
     `serverTime` as the cursor** — it's still returned for informational purposes only.
-- [ ] 4. Auth/admin endpoints (`/api/setup`, `/api/login`, `/api/logout`, `/api/password`, `/api/me`, `/api/users`, `/api/test-email`)
+- [x] 4. Auth/admin endpoints (`/api/setup`, `/api/login`, `/api/logout`, `/api/password`, `/api/me`, `/api/users`, `/api/test-email`)
+  - Also added `lib/mailer.php` (`mail_enabled()`, `send_mail()`, `skip_mail()`, `notify_changes()` — ports server.js's
+    mailer/notifyChanges 1:1, via PHP's `mail()`) and wired it into `PUT /api/docs/:col/:id` in `api.php`, closing the
+    gap item 3 deliberately deferred. `mail_enabled()` still just checks a `MAIL_ENABLED` constant that doesn't exist
+    until `config.sample.php` (item 8) defines it — until then email alerts are off and every mail-related code path
+    is a no-op, which is safe to leave as-is.
+  - Added `lib/http.php`'s `finish_response()` (wraps `fastcgi_finish_request()` where available) and call it right
+    after `send_json()` in the `PUT /api/docs` handler, before `notify_changes()`. **Read this before touching any
+    other fire-and-forget-after-response code**: plain PHP (unlike Node) normally buffers the whole response until
+    the script ends, so without this, every doc edit would wait on `mail()` to finish even though the client already
+    "has" its 200 response conceptually. Only works under PHP-FPM; under mod_php/suPHP it's a no-op (request just
+    waits on the mail call instead) — harmless given `mail_enabled()` defaults to off, just slower once mail is on.
+  - Added `valid_email()`/`clean_email()` to `lib/auth.php` (ports server.js's `validEmail`/`cleanEmail`) — use these,
+    don't re-invent email validation in a new route.
+  - No `broadcast_users()`-equivalent exists or is needed: unlike Node's SSE push, every `/api/changes` poll already
+    re-fetches the full user list fresh. If you're tempted to add a "broadcast on user change" mechanism for a later
+    item, you very likely don't need to — check whether the next poll already covers it first.
+  - For whoever builds item 5 (file upload/download): `Q` (`lib/db.php`) already has `addFile`/`getFile`/`delFile`
+    ready to use; nothing new needed there. The upload endpoint's raw-request-body handling should reuse
+    `read_raw_body()` from `lib/http.php` (same size-limit enforcement pattern as `read_json_doc()`), not
+    `read_json_body()`/`read_json_doc()` (the uploaded bytes aren't JSON).
 - [ ] 5. File upload/download endpoints (`POST /api/files`, `GET /_blob/{id}`)
 - [ ] 6. `public_html/index.html`: swap EventSource for polling (`/api/changes?since=`)
 - [ ] 7. Cron scripts: `scripts/backup.php`, `scripts/workorder_sync.php`, `scripts/reset_password.php`

@@ -91,6 +91,17 @@ function check_new_password(mixed $password): void
     }
 }
 
+/** Matches server.js's validEmail(): simple shape check plus a length cap. */
+function valid_email(mixed $e): bool
+{
+    return is_string($e) && strlen($e) <= 200 && (bool) preg_match('/^[^\s@]+@[^\s@]+\.[^\s@]+$/', $e);
+}
+
+function clean_email(mixed $e): string
+{
+    return strtolower(trim((string) $e));
+}
+
 /** Shapes a `users` row for API responses — never exposes `pass`. */
 function public_user(?array $u): ?array
 {

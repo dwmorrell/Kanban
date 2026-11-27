@@ -2,20 +2,13 @@
 /**
  * Front controller for Event Board's PHP API.
  *
- * This build step wires up the route table and the core, non-auth-specific
  * CRUD endpoints: GET /api/status, GET /api/state, PUT/DELETE
- * /api/docs/{col}/{id}, and GET /api/changes (the polling replacement for
- * the Node version's SSE /api/events, per docs/PHP_REWRITE_PLAN.md's
- * frontend contract). Auth/admin endpoints (/api/setup, /api/login, ...)
- * and file upload/download are separate build-order items and are not
- * registered here yet.
- *
- * Deferred to a later item: server.js's notifyChanges() (email alerts on
- * task/show changes) runs after a successful PUT /api/docs here. It depends
- * on a mailer that doesn't exist yet (item 4 wires up /api/test-email and,
- * per the plan, PHP's built-in mail()). Once that lands, hook it into the
- * PUT handler below the same way server.js does (fire-and-forget, after the
- * response is sent, never blocking or failing the request on a mail error).
+ * /api/docs/{col}/{id}, GET /api/changes (the polling replacement for the
+ * Node version's SSE /api/events), auth/admin endpoints (/api/setup,
+ * /api/login, /api/logout, /api/password, /api/me, /api/users,
+ * /api/test-email), and the email-notification hook on doc writes.
+ * File upload/download (/api/files, /_blob/{id}) is a separate build-order
+ * item and is not registered here yet.
  *
  * .htaccess routing /api/* here is item 8; until then this file is only
  * reachable by pointing a request at it directly.
@@ -23,6 +16,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/lib/http.php';
+require_once __DIR__ . '/lib/mailer.php';
 
 const COLLECTIONS = ['shows', 'tasks', 'config'];
 
@@ -49,19 +43,6 @@ function user_payload(): array
         ],
         Q::listUsers()
     );
-}
-
-/**
- * Whether the UI should show mail-dependent affordances (e.g. "send test
- * email"). The Node version reported `!!process.env.SMTP_HOST`; this port
- * uses PHP's built-in mail() instead of SMTP (see PHP_REWRITE_PLAN.md), so
- * there is no equivalent "is it configured" signal yet. Default to off
- * until a later item defines MAIL_ENABLED in config.php and wires up
- * /api/test-email to actually exercise it.
- */
-function mail_enabled(): bool
-{
-    return defined('MAIL_ENABLED') && MAIL_ENABLED === true;
 }
 
 $router = new Router();
@@ -99,10 +80,24 @@ $router->add('GET', '/api/state', function (array $params, ?array $user): void {
 }, 'user');
 
 $router->add('PUT', '/api/docs/:col/:id', function (array $params, ?array $user): void {
-    check_doc_path($params['col'], $params['id']);
+    [$col, $id] = [$params['col'], $params['id']];
+    check_doc_path($col, $id);
     $json = read_json_doc(600 * 1024);
-    Q::putDoc($params['col'], $params['id'], $json, now_ms(), $user['id']);
+    // Read in assoc mode here (not decode_doc_data()'s object mode): this is
+    // only for reading a few known fields (title/waiting/assignee/etc.) in
+    // notify_changes() below, never re-serialized whole. See lib/http.php's
+    // file header on why that distinction matters.
+    $beforeRaw = Q::getDoc($col, $id);
+    $before = $beforeRaw !== null ? json_decode($beforeRaw, true) : null;
+    Q::putDoc($col, $id, $json, now_ms(), $user['id']);
     send_json(200, ['ok' => true]);
+    finish_response();
+    if ($col !== 'config') {
+        $after = json_decode($json, true);
+        if (is_array($after)) {
+            notify_changes($col, $id, is_array($before) ? $before : null, $after, $user);
+        }
+    }
 }, 'user');
 
 $router->add('DELETE', '/api/docs/:col/:id', function (array $params, ?array $user): void {
@@ -138,5 +133,138 @@ $router->add('GET', '/api/changes', function (array $params, ?array $user): void
         'serverTime' => now_ms(),
     ]);
 }, 'user');
+
+/* ---------- auth ---------- */
+
+$router->add('POST', '/api/setup', function (): void {
+    if (Q::countUsers() > 0) {
+        throw new ApiError(409, 'already_setup', 'The board already has an admin. Sign in instead.');
+    }
+    $b = read_json_body();
+    $email = clean_email($b['email'] ?? '');
+    if (!valid_email($email)) {
+        throw new ApiError(400, 'invalid_email', 'Enter a valid email address.');
+    }
+    check_new_password($b['password'] ?? null);
+    $id = new_id();
+    $name = trim((string) ($b['name'] ?? ''));
+    $name = $name !== '' ? substr($name, 0, 80) : $email;
+    Q::addUser($id, $email, $name, 'admin', hash_password((string) $b['password']), now_ms());
+    start_session($id);
+    send_json(200, ['user' => public_user(Q::userById($id))]);
+});
+
+$router->add('POST', '/api/login', function (): void {
+    rate_limit();
+    $b = read_json_body();
+    $user = Q::userByEmail(clean_email($b['email'] ?? ''));
+    if ($user === null || !check_password((string) ($b['password'] ?? ''), $user['pass'])) {
+        throw new ApiError(401, 'bad_login', 'Wrong email or password.');
+    }
+    start_session($user['id']);
+    send_json(200, ['user' => public_user($user)]);
+});
+
+$router->add('POST', '/api/logout', function (): void {
+    end_session();
+    send_json(200, ['ok' => true]);
+});
+
+/* ---------- your own account ---------- */
+
+$router->add('PATCH', '/api/me', function (array $params, ?array $user): void {
+    $b = read_json_body();
+    if (is_string($b['name'] ?? null)) {
+        $name = trim($b['name']);
+        Q::setUserName($name !== '' ? substr($name, 0, 80) : $user['email'], $user['id']);
+    }
+    // No broadcast needed: unlike Node's SSE push, every /api/changes poll
+    // already re-fetches the full user list fresh (see user_payload() call
+    // there), so the next poll picks this up automatically.
+    send_json(200, ['user' => public_user(Q::userById($user['id']))]);
+}, 'user');
+
+$router->add('POST', '/api/password', function (array $params, ?array $user): void {
+    rate_limit();
+    $b = read_json_body();
+    if (!check_password((string) ($b['current'] ?? ''), $user['pass'])) {
+        throw new ApiError(400, 'bad_password', 'Your current password is wrong.');
+    }
+    check_new_password($b['next'] ?? null);
+    Q::setUserPass(hash_password((string) $b['next']), $user['id']);
+    Q::delUserSessionsExcept($user['id'], $user['sessionTokenHash']);
+    send_json(200, ['ok' => true]);
+}, 'user');
+
+/* ---------- admin: logins ---------- */
+
+$router->add('POST', '/api/users', function (): void {
+    $b = read_json_body();
+    $email = clean_email($b['email'] ?? '');
+    if (!valid_email($email)) {
+        throw new ApiError(400, 'invalid_email', 'Enter a valid email address.');
+    }
+    if (Q::userByEmail($email) !== null) {
+        throw new ApiError(409, 'exists', "$email already has a login.");
+    }
+    check_new_password($b['password'] ?? null);
+    $role = ($b['role'] ?? null) === 'admin' ? 'admin' : 'member';
+    $name = trim((string) ($b['name'] ?? ''));
+    Q::addUser(new_id(), $email, $name !== '' ? substr($name, 0, 80) : $email, $role, hash_password((string) $b['password']), now_ms());
+    // No broadcast needed here either — see the /api/me handler's comment above.
+    send_json(200, ['users' => user_payload()]);
+}, 'admin');
+
+$router->add('PATCH', '/api/users/:id', function (array $params, ?array $me): void {
+    $target = Q::userById($params['id']);
+    if ($target === null) {
+        throw new ApiError(404, 'not_found', 'That login no longer exists.');
+    }
+    $b = read_json_body();
+    if (is_string($b['name'] ?? null)) {
+        $name = trim($b['name']);
+        Q::setUserName($name !== '' ? substr($name, 0, 80) : $target['email'], $params['id']);
+    }
+    $role = $b['role'] ?? null;
+    if ($role === 'admin' || $role === 'member') {
+        if ($role === 'member' && $target['role'] === 'admin' && Q::countAdmins() <= 1) {
+            throw new ApiError(400, 'last_admin', 'The board needs at least one admin.');
+        }
+        Q::setUserRole($role, $params['id']);
+    }
+    if (array_key_exists('password', $b)) {
+        check_new_password($b['password']);
+        Q::setUserPass(hash_password((string) $b['password']), $params['id']);
+        if ($params['id'] !== $me['id']) {
+            Q::delUserSessions($params['id']);
+        }
+    }
+    // No broadcast needed here either — see the /api/me handler's comment above.
+    send_json(200, ['users' => user_payload()]);
+}, 'admin');
+
+$router->add('DELETE', '/api/users/:id', function (array $params, ?array $me): void {
+    if ($params['id'] === $me['id']) {
+        throw new ApiError(400, 'self', "You can't remove your own login.");
+    }
+    if (Q::userById($params['id']) !== null) {
+        Q::delUser($params['id']);
+        // No SSE streams to close here (polling, not push) — nothing else to do.
+    }
+    // No broadcast needed here either — see the /api/me handler's comment above.
+    send_json(200, ['users' => user_payload()]);
+}, 'admin');
+
+$router->add('POST', '/api/test-email', function (array $params, ?array $user): void {
+    if (!mail_enabled()) {
+        throw new ApiError(400, 'mail_off', 'Email is not set up. Define MAIL_ENABLED in config.php and restart.');
+    }
+    try {
+        send_mail($user['email'], 'Event Board test email', 'Email alerts from Event Board are working.');
+    } catch (Throwable $e) {
+        throw new ApiError(502, 'mail_failed', 'The email could not be sent. The mail server said: ' . $e->getMessage());
+    }
+    send_json(200, ['ok' => true, 'to' => $user['email']]);
+}, 'admin');
 
 run_api($router);

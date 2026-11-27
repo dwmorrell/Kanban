@@ -45,6 +45,20 @@ run will redo/finish it rather than skipping ahead.
     returns `false` unless a `MAIL_ENABLED` constant is defined truthy in `config.php` — there's no such
     constant yet (config.sample.php is item 8). Revisit once item 4/8 settle on how mail readiness is
     actually signaled.
+  - **Correction applied after a second architecture review, to already-committed item-3 code**: the
+    original `/api/changes?since=<ms>` cursor was the raw `updated` epoch-ms timestamp. That's racy —
+    two writes can land in the same millisecond under concurrent requests, and a strict `updated > since`
+    query can then permanently miss whichever one was delivered second. Fixed by adding a `doc_seq`
+    AUTO_INCREMENT ticker table and a `docs.seq` column (minted inside the same transaction as each
+    `putDoc`/`delDoc` write, since `ON DUPLICATE KEY UPDATE` doesn't advance a row's own primary-key
+    auto-increment). `/api/changes?since=` and the `cursor` it/`/api/state` return are now **seq values,
+    not timestamps** — `docsSince()` in `lib/db.php` also applies a small (20-row) overlap behind the
+    client's cursor to cover the much smaller residual race where two transactions commit out of
+    mint-order; this is safe because the frontend's `db.apply(col,id,data)` is idempotent, so redelivering
+    a few already-seen rows costs nothing. Full reasoning is in both functions' docblocks in `lib/db.php`.
+    **If you are building item 6 (the frontend poll loop): use the `cursor` field from `/api/state` to seed
+    the first poll, and the `cursor` field from each `/api/changes` response to advance it. Do not use
+    `serverTime` as the cursor** — it's still returned for informational purposes only.
 - [ ] 4. Auth/admin endpoints (`/api/setup`, `/api/login`, `/api/logout`, `/api/password`, `/api/me`, `/api/users`, `/api/test-email`)
 - [ ] 5. File upload/download endpoints (`POST /api/files`, `GET /_blob/{id}`)
 - [ ] 6. `public_html/index.html`: swap EventSource for polling (`/api/changes?since=`)

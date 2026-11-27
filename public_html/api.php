@@ -91,6 +91,10 @@ $router->add('GET', '/api/state', function (array $params, ?array $user): void {
         'users' => user_payload(),
         'me' => public_user($user),
         'mail' => mail_enabled(),
+        // Seeds the frontend's first /api/changes poll cursor, so it doesn't
+        // redeliver this entire snapshot again a moment later (harmless if
+        // it did, since db.apply() is idempotent, but wasteful).
+        'cursor' => Q::currentSeq(),
     ]);
 }, 'user');
 
@@ -108,22 +112,29 @@ $router->add('DELETE', '/api/docs/:col/:id', function (array $params, ?array $us
 }, 'user');
 
 $router->add('GET', '/api/changes', function (array $params, ?array $user): void {
+    // `since` is a seq cursor (from /api/state's or a previous /api/changes
+    // response's `cursor`), not a timestamp — see docsSince()'s docblock in
+    // lib/db.php for why `updated` alone isn't safe to use as the cursor.
     $sinceRaw = $_GET['since'] ?? null;
     $since = (is_string($sinceRaw) && ctype_digit($sinceRaw)) ? (int) $sinceRaw : 0;
 
-    $docs = array_map(
-        static fn (array $row): array => [
+    $rows = Q::docsSince($since);
+    $cursor = $since;
+    $docs = [];
+    foreach ($rows as $row) {
+        $docs[] = [
             'col' => $row['col'],
             'id' => $row['id'],
             'data' => decode_doc_data($row['data']),
             'updated' => (int) $row['updated'],
-        ],
-        Q::docsSince($since)
-    );
+        ];
+        $cursor = max($cursor, (int) $row['seq']);
+    }
 
     send_json(200, [
         'docs' => $docs,
         'users' => user_payload(),
+        'cursor' => $cursor,
         'serverTime' => now_ms(),
     ]);
 }, 'user');

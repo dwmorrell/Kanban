@@ -10,10 +10,24 @@
  *    PHP process does not persist state between requests.
  *  - `docs.data` is NULLable. A row with data = NULL is a *tombstone*:
  *    the doc existed, was deleted, and the row is kept (instead of being
- *    removed) so that GET /api/changes?since=<ms> can tell long-poll
- *    clients "this id was deleted at <updated>" instead of silently
- *    losing the deletion. /api/state and allDocs() only ever see live
- *    (non-tombstoned) docs.
+ *    removed) so that GET /api/changes?since=<cursor> can tell long-poll
+ *    clients "this id was deleted" instead of silently losing the
+ *    deletion. /api/state and allDocs() only ever see live (non-tombstoned)
+ *    docs.
+ *  - `docs.seq` (backed by the `doc_seq` ticker table) is the actual
+ *    /api/changes cursor, NOT `updated`. `updated` is epoch-ms and two
+ *    writes can legitimately land in the same millisecond under concurrent
+ *    requests (e.g. a drag-and-drop reorder firing several PUTs back to
+ *    back); a cursor of "updated > since" can then permanently miss a row
+ *    whose timestamp collides with one already delivered, since neither
+ *    "since" nor any later cursor value would ever be < that shared
+ *    timestamp again. `seq` is minted from a dedicated AUTO_INCREMENT
+ *    ticker (not `docs`' own primary key, since ON DUPLICATE KEY UPDATE
+ *    does not advance a row's own auto-increment value — only a fresh
+ *    INSERT does) inside the same transaction as the docs write, so it is
+ *    strictly monotonic per write, update or insert alike. See
+ *    docsSince()'s docblock for the remaining (much smaller) race this
+ *    doesn't fully close and the deliberate overlap-based mitigation.
  *
  * Requires config.php (not committed; see config.sample.php, added in a
  * later rewrite step) to define: DB_HOST, DB_NAME, DB_USER, DB_PASS.
@@ -62,14 +76,21 @@ function ensure_schema(PDO $pdo): void
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ');
     $pdo->exec('
+        CREATE TABLE IF NOT EXISTS doc_seq (
+            seq BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ');
+    $pdo->exec('
         CREATE TABLE IF NOT EXISTS docs (
             col VARCHAR(20) NOT NULL,
             id VARCHAR(100) NOT NULL,
             data LONGTEXT NULL,
             updated BIGINT NOT NULL,
             updated_by CHAR(32) NULL,
+            seq BIGINT UNSIGNED NOT NULL DEFAULT 0,
             PRIMARY KEY (col, id),
-            INDEX idx_docs_updated (updated)
+            INDEX idx_docs_updated (updated),
+            INDEX idx_docs_seq (seq)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ');
     $pdo->exec('
@@ -233,39 +254,99 @@ final class Q
         return $row ? $row['data'] : null;
     }
 
-    public static function putDoc(string $col, string $id, string $data, int $updated, ?string $updatedBy): void
+    /**
+     * Mints the next value from the doc_seq ticker. Must be called inside
+     * the same transaction as the docs write it's stamping, so the seq
+     * value and the row it's attached to become visible to other
+     * connections atomically together on commit.
+     */
+    private static function mintSeq(PDO $pdo): int
     {
-        self::run(
-            'INSERT INTO docs (col, id, data, updated, updated_by) VALUES (?, ?, ?, ?, ?)
-             ON DUPLICATE KEY UPDATE data = VALUES(data), updated = VALUES(updated), updated_by = VALUES(updated_by)',
-            [$col, $id, $data, $updated, $updatedBy]
-        );
+        $pdo->exec('INSERT INTO doc_seq (seq) VALUES (NULL)');
+        return (int) $pdo->lastInsertId();
+    }
+
+    /** @return int the seq this write was stamped with. */
+    public static function putDoc(string $col, string $id, string $data, int $updated, ?string $updatedBy): int
+    {
+        $pdo = self::pdo();
+        $pdo->beginTransaction();
+        try {
+            $seq = self::mintSeq($pdo);
+            $stmt = $pdo->prepare(
+                'INSERT INTO docs (col, id, data, updated, updated_by, seq) VALUES (?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE data = VALUES(data), updated = VALUES(updated),
+                     updated_by = VALUES(updated_by), seq = VALUES(seq)'
+            );
+            $stmt->execute([$col, $id, $data, $updated, $updatedBy, $seq]);
+            $pdo->commit();
+            return $seq;
+        } catch (Throwable $e) {
+            $pdo->rollBack();
+            throw $e;
+        }
     }
 
     /**
      * Soft-delete: turns a live doc into a tombstone (data = NULL) so
      * /api/changes can report the deletion. A no-op if the doc was never
-     * live (nothing to tell pollers).
+     * live (nothing to tell pollers), though a seq is still minted either
+     * way — harmless, since the cursor scheme only needs seq to be
+     * monotonic, not gap-free.
+     *
+     * @return int the seq this write was stamped with.
      */
-    public static function delDoc(string $col, string $id, int $updated, ?string $updatedBy): void
+    public static function delDoc(string $col, string $id, int $updated, ?string $updatedBy): int
     {
-        self::run(
-            'UPDATE docs SET data = NULL, updated = ?, updated_by = ?
-             WHERE col = ? AND id = ? AND data IS NOT NULL',
-            [$updated, $updatedBy, $col, $id]
-        );
+        $pdo = self::pdo();
+        $pdo->beginTransaction();
+        try {
+            $seq = self::mintSeq($pdo);
+            $stmt = $pdo->prepare(
+                'UPDATE docs SET data = NULL, updated = ?, updated_by = ?, seq = ?
+                 WHERE col = ? AND id = ? AND data IS NOT NULL'
+            );
+            $stmt->execute([$updated, $updatedBy, $seq, $col, $id]);
+            $pdo->commit();
+            return $seq;
+        } catch (Throwable $e) {
+            $pdo->rollBack();
+            throw $e;
+        }
     }
 
     /**
-     * Rows changed strictly after $sinceMs, oldest first. `data` is null
-     * for deletions. Backs GET /api/changes?since=<ms>.
+     * Rows with seq strictly greater than $sinceSeq - OVERLAP, oldest first.
+     * `data` is null for deletions. Backs GET /api/changes?since=<seq>.
+     *
+     * Why the overlap: minting a seq and committing the docs row it's
+     * attached to are two different moments (two transactions can
+     * interleave: B mints a higher seq and commits before A, which minted a
+     * lower seq earlier, finally commits). A poller that had already
+     * advanced its cursor to B's seq would then never see A's row under a
+     * strict "seq > cursor" query, since A's seq is lower. Re-querying a
+     * small window behind the client's cursor closes that gap; it costs
+     * nothing semantically because the frontend's db.apply(col,id,data) is
+     * idempotent, so re-delivering a handful of already-seen rows is
+     * harmless. This is a deliberate, proportionate choice for this app's
+     * scale (a venue's internal crew, not a high-concurrency system) rather
+     * than a full transaction-visibility watermark.
      */
-    public static function docsSince(int $sinceMs): array
+    public static function docsSince(int $sinceSeq): array
     {
+        $overlap = 20;
+        $from = max(0, $sinceSeq - $overlap);
         return self::all(
-            'SELECT col, id, data, updated FROM docs WHERE updated > ? ORDER BY updated ASC',
-            [$sinceMs]
+            'SELECT col, id, data, updated, seq FROM docs WHERE seq > ? ORDER BY seq ASC',
+            [$from]
         );
+    }
+
+    /** Current high-water mark, for seeding a fresh client's first poll cursor (see /api/state). */
+    public static function currentSeq(): int
+    {
+        $row = self::one('SELECT MAX(seq) AS s FROM docs');
+        return $row && $row['s'] !== null ? (int) $row['s'] : 0;
     }
 
     /* ---------- files ---------- */

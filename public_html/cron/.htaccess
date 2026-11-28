@@ -1,0 +1,16 @@
+# CLI-only directory: cPanel Cron Jobs invoke these scripts by filesystem
+# path, not by URL, and every script in here also refuses to run at all
+# outside the CLI SAPI (PHP_SAPI !== 'cli' check at the top of each file).
+# This .htaccess blocks direct web access as a second, independent layer of
+# defense on top of that in-script check.
+
+# Apache 2.4+
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+
+# Apache 2.2 and earlier
+<IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+</IfModule>

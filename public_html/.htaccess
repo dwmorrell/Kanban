@@ -1,0 +1,35 @@
+# Event Board — front-controller routing.
+#
+# /api/* and /_blob/* are routed to api.php, which does its own routing
+# internally (see lib/http.php's Router/run_api()) based on the untouched
+# $_SERVER['REQUEST_URI'] — mod_rewrite does not alter that superglobal, so
+# api.php sees the original request path regardless of this rewrite.
+# Everything else (just index.html, the SPA) is served as a normal static
+# file by Apache, matching the original Node app serving the SPA at "/".
+
+Options -Indexes
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /
+
+    RewriteRule ^api/ api.php [L]
+    RewriteRule ^_blob/ api.php [L]
+</IfModule>
+
+DirectoryIndex index.html
+
+# Defense in depth: config.php/config.sample.php are only ever read via
+# require_once (lib/db.php), never requested directly, and only define
+# constants (no output) even if they were — but block direct web access to
+# them by name anyway, in case a host ever serves .php source as plain
+# text under a misconfiguration.
+<FilesMatch "^config(\.sample)?\.php$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>

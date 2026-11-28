@@ -110,9 +110,77 @@ By default it checks the sheet every 15 minutes (`WORKORDER_SYNC_MINUTES`) and r
 
 Checklists, file uploads, links and @ mentions added on the board to a synced card are never touched by a resync — only the fields that come from the sheet (title, column, assignee, due date, room, notes) are kept in sync. If a row is deleted from the sheet, its card is removed from the board.
 
+## Deploying the PHP version to shared cPanel hosting
+
+Everything above describes the Node.js version, for an always-on machine you control. This repo also includes a separate PHP+MySQL port of the board, under `public_html/`, built for plain shared cPanel hosting where you only have FTP and a MySQL database — no SSH guaranteed, no persistent process, no Node.js. It's the same board; which version you deploy depends on what hosting you have.
+
+The PHP version replaces the Node version's two background timers with cPanel Cron Jobs (step 6 below) and its SQLite database with MySQL, but everything else — the board itself, sign-in, file uploads, email alerts, work order sheet sync — works the same way.
+
+### 1. Create the database
+
+cPanel → **MySQL® Databases** → create a database and a database user, then add that user to the database with **All Privileges**. Note the three names it generates (cPanel usually prefixes the database and user name with your cPanel username, e.g. `myuser_eventboard` / `myuser_ebuser`) — you'll need them in step 3.
+
+No separate schema-import step is needed for a brand new board: the first request (or the first cron script run) automatically creates every table it needs. If you're restoring from an existing backup instead, see "Backups" below.
+
+### 2. Upload the files
+
+Upload everything **inside** this repo's `public_html/` folder to your hosting account's web root via FTP — not the `public_html/` folder itself, its contents. Make sure your FTP client is set to show hidden files, so `.htaccess` and `.user.ini` actually get uploaded; both are easy to upload and both matter (routing and upload size limits respectively).
+
+### 3. Configure `config.php`
+
+Copy `config.sample.php` to `config.php` in the same folder, directly on the server (cPanel's File Manager, or rename after FTP upload) — never by committing it or pasting real credentials into chat. Fill in the real `DB_HOST`/`DB_NAME`/`DB_USER`/`DB_PASS` from step 1. `config.sample.php` documents every other optional setting (email alerts, backups, work order sync, etc.) inline.
+
+### 4. Set folder permissions
+
+FTP-created folders often land with permissions too restrictive for PHP to write to. Via cPanel's File Manager, set `private/`, `private/uploads/` and `private/backups/` to `755` (right-click → Permissions).
+
+### 5. Create the admin account
+
+Visit the site. The first visit prompts you to create the admin account, same as the Node version.
+
+### 6. Set up cPanel Cron Jobs
+
+cPanel → **Cron Jobs** → **Add New Cron Job**, once for each job below. cPanel's cron environment may run a different PHP version than your site's vhost — cPanel's Cron Jobs page usually tells you the exact versioned binary path to use (e.g. `/usr/local/bin/php81`) instead of a bare `php`; use whatever it suggests for your account in place of the path shown here.
+
+Nightly backup (replaces the Node version's 3am timer):
+```
+0 3 * * * /usr/local/bin/php81 /home/yourcpaneluser/public_html/cron/backup.php >/dev/null 2>&1
+```
+
+Work order sheet sync (optional — only does anything once `WORKORDER_APPS_SCRIPT_URL` is set in `config.php`; replaces the Node version's 15-minute timer):
+```
+*/15 * * * * /usr/local/bin/php81 /home/yourcpaneluser/public_html/cron/workorder_sync.php >/dev/null 2>&1
+```
+
+cPanel Cron Jobs run in the server's own system timezone, not something this app controls — set the times above with that in mind. After adding each job, run it once manually (or just wait for its first scheduled run) to confirm it works before relying on the schedule.
+
+### Resetting a password with no admin signed in
+
+`cron/reset_password.php` is the PHP equivalent of `npm run reset-password`. With SSH or cPanel's Terminal app:
+```
+php public_html/cron/reset_password.php someone@yourvenue.com NewPassword123
+```
+Without either, run it once via a temporary Cron Job instead: add a one-off job with that exact command (full PHP path, as in step 6), wait for it to fire, confirm the new password works, then **delete that cron entry** — it's a one-time reset, not something that should keep running on a schedule.
+
+### Upload size
+
+`POST /api/files` sends the uploaded file as the raw request body, so PHP's `post_max_size` — not `upload_max_filesize` — is what actually limits it here. The `.user.ini` you uploaded in step 2 already raises both of these, plus `memory_limit` and `max_execution_time`, with headroom over `config.php`'s default `MAX_UPLOAD_MB` of 25. If you raise `MAX_UPLOAD_MB` in `config.php`, raise `.user.ini`'s `upload_max_filesize`/`post_max_size` to match. `.user.ini` changes can take up to 5 minutes to take effect — don't panic-debug an upload failure immediately after editing it.
+
+### Backups
+
+Same idea as the Node version's nightly backup, just driven by the cPanel Cron Job from step 6 instead of a built-in timer. Each run writes a dated folder under `private/backups/` containing `dump.sql` (a plain data-only SQL dump, not a `mysqldump` file — this works even on hosts that disable `exec()`/`shell_exec()`) and a copy of `private/uploads/`, then deletes any backups beyond the most recent `BACKUP_KEEP` (default 14) and purges deleted-card records older than 30 days.
+
+To restore: get a fresh copy of the schema in place (visiting the site once against an empty, newly-created database is enough), import that backup's `dump.sql` via phpMyAdmin or cPanel's "MySQL® Databases" import tool, then copy that backup's `uploads/` folder back over `private/uploads/`.
+
+As with the Node version, periodically copy `private/backups/` somewhere off this hosting account too — it only protects against mistakes on this account, not against losing the account itself.
+
+### Email deliverability
+
+PHP's `mail()` needs no setup to start working on cPanel once `MAIL_ENABLED` is turned on in `config.php`, but shared-IP cPanel hosts are more likely to land in spam without SPF/DKIM configured for the sending domain — check cPanel's **Email → Authentication** page after turning email alerts on.
+
 ## Updating
 
-Download the newer version, keep your `data` folder and `.env`, and run `docker compose up -d --build` again (or `npm install` then restart `npm start`).
+Download the newer version, keep your `data` folder and `.env`, and run `docker compose up -d --build` again (or `npm install` then restart `npm start`). For the PHP version, keep `config.php` and the `private/` folder, and re-upload the rest of `public_html/` via FTP.
 
 ## Settings (`.env`)
 

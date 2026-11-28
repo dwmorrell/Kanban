@@ -187,6 +187,60 @@ run will redo/finish it rather than skipping ahead.
     fallback pattern `api.php`'s `upload_dir()`/`max_upload_bytes()` already established for item 5 —
     whoever builds item 8 should add these as documented, commented-out-by-default constants in
     `config.sample.php` rather than changing how the cron scripts read them.
-- [ ] 8. `config.sample.php`, `.htaccess` files, deployment README section
+- [x] 8. `config.sample.php`, `.htaccess` files, deployment README section
+  - `public_html/config.sample.php` documents every constant any prior item's code reads via
+    `defined('X')` (grepped across `lib/*.php`, `api.php`, `cron/*.php` to build the list):
+    `DB_HOST`/`DB_NAME`/`DB_USER`/`DB_PASS` (required), `BASE_URL`, `TRUST_PROXY`, `COOKIE_SECURE`,
+    `UPLOAD_DIR`, `MAX_UPLOAD_MB`, `MAIL_ENABLED`, `MAIL_FROM`, `BACKUP_DIR`, `BACKUP_KEEP`,
+    `WORKORDER_APPS_SCRIPT_URL`, `WORKORDER_APPS_SCRIPT_TOKEN`, `WORKORDER_SHEET_NAME`,
+    `WORKORDER_SHEET_RANGE`. Deliberately does **not** add a `WORKORDER_SYNC_MINUTES` or
+    `BACKUP_HOUR`-equivalent constant — per the plan, cron timing is set directly in cPanel's Cron
+    Jobs UI, not read from config.php. `public_html/config.php` (the real, uncommitted file) was
+    added to `.gitignore`.
+  - `public_html/.htaccess` (root): `mod_rewrite` routes `/api/*` and `/_blob/*` to `api.php`
+    (`$_SERVER['REQUEST_URI']` is unaffected by the rewrite, which is what `run_api()` parses for
+    routing — verified, not just assumed, below); everything else serves as a static file.
+    `Options -Indexes`, `DirectoryIndex index.html`, and a `<FilesMatch>` block (both Apache
+    2.2/2.4 deny syntax) block direct web access to `config.php`/`config.sample.php` by name as
+    defense in depth.
+  - `public_html/private/.htaccess` and `public_html/cron/.htaccess`: deny-all (both Apache
+    2.2/2.4 syntax) per the plan. `private/`'s rule applies recursively to `uploads/`/`backups/`,
+    so no separate `.htaccess` was added in either (confirmed by the live test below). Added
+    `.gitkeep` to both so they exist on a fresh FTP upload rather than being created on first
+    write by `upload_dir()`/`backup_dir()`.
+  - `public_html/.user.ini`: raises `upload_max_filesize`/`post_max_size`/`memory_limit`/
+    `max_execution_time` with headroom over `config.sample.php`'s default `MAX_UPLOAD_MB=25`, per
+    the plan's upload-limit gotcha (`post_max_size` is what matters here, not
+    `upload_max_filesize`, since uploads are a raw POST body, not multipart). Shipped as a real,
+    committed file (not a `.sample`) since it holds no secrets, unlike `config.php`.
+  - README.md: added a new top-level section "Deploying the PHP version to shared cPanel hosting"
+    (before "Updating"), covering DB creation, FTP upload, `config.php` setup, `private/`
+    permissions (`755`), cPanel Cron Jobs for both scripts (with the "cPanel's cron PHP binary may
+    differ from the vhost's" gotcha from the plan), a no-SSH password-reset workaround (one-off
+    cron job), the `.user.ini` upload-size note, backup/restore steps, and an SPF/DKIM
+    deliverability note. Left the existing Node/Docker instructions above it completely untouched
+    — this is an additional deployment track for this same repo, not a replacement.
+  - **This sandbox again had an installable MariaDB (as item 7 found) — this time Apache 2.4 with
+    `mod_rewrite`/`mod_php` was also installable, so this item was verified by actually serving
+    `public_html/` through real Apache with `AllowOverride All` (not just reasoning about the
+    `.htaccess` syntax):** confirmed `GET /` serves `index.html` (200), `GET /api/status` through
+    the rewrite returns the real JSON response with `$_GET`/query-string params intact, `/private/`,
+    `/private/uploads/.gitkeep`, `/cron/backup.php`, `/config.php`, and `/config.sample.php` all
+    return 403, and a `PUT /api/docs/...` without the `x-requested-with` header is still blocked
+    with 403 by `run_api()`'s CSRF check even when reached through the rewrite. Also ran, against
+    the same real MariaDB instance, through the full stack with a `config.php` copied from
+    `config.sample.php` (fresh schema creation, `/api/setup`, `/api/login`, a doc `PUT`/`DELETE`
+    and confirming both the live doc and the tombstone show up correctly in `/api/changes`,
+    `POST /api/files` + `GET /_blob/{id}` round-tripping real bytes, `cron/backup.php` producing a
+    real `dump.sql` with both the tombstone and the files row from this test, and
+    `cron/reset_password.php`'s success path) — all against the directory defaults
+    `config.sample.php`'s comments describe (`UPLOAD_DIR`/`BACKUP_DIR` undefined, so
+    `private/uploads`/`private/backups`). Apache, MariaDB, and the test `config.php`, uploaded
+    test files, and generated backup directory were all stopped/removed afterward; `git status`
+    confirms only the real source files below are tracked/new.
+  - All 8 build-order items are now complete. Final real-world verification (the actual FTP
+    upload, cPanel DB/cron setup, and a first live end-to-end check with real credentials) is the
+    user's step per the plan — nothing further for a nightly resume run to do here unless the user
+    reports a problem.
 
 Each run: commit with a message naming which numbered item(s) it advanced, push to `claude/php-rewrite`, then update this checklist in the same commit.

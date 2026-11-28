@@ -34,6 +34,13 @@
  */
 declare(strict_types=1);
 
+// Every timestamp in this app is epoch-ms (matching the frontend's
+// Date.now()-based model); setting this explicitly, rather than relying on
+// the host's php.ini default, keeps date()-based formatting (backup
+// filenames, cron scripts' date math) on UTC too instead of drifting with
+// whatever timezone the shared host happens to be configured for.
+date_default_timezone_set('UTC');
+
 require_once __DIR__ . '/../config.php';
 
 function db(): PDO
@@ -347,6 +354,20 @@ final class Q
     {
         $row = self::one('SELECT MAX(seq) AS s FROM docs');
         return $row && $row['s'] !== null ? (int) $row['s'] : 0;
+    }
+
+    /**
+     * Permanently removes tombstoned (already-deleted) docs rows older
+     * than $beforeMs. Nothing else purges these — /api/changes needs them
+     * to tell a poller that missed the live moment "this id was deleted,"
+     * but keeping every tombstone forever would grow the table without
+     * bound. Called from cron/backup.php after each backup completes.
+     *
+     * @return int number of rows removed.
+     */
+    public static function purgeTombstones(int $beforeMs): int
+    {
+        return self::run('DELETE FROM docs WHERE data IS NULL AND updated < ?', [$beforeMs])->rowCount();
     }
 
     /* ---------- files ---------- */

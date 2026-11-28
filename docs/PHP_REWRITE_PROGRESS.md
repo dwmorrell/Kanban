@@ -117,7 +117,76 @@ run will redo/finish it rather than skipping ahead.
     itself) just returns without scheduling another poll, since the page is about to reload anyway.
   - Did not touch any other frontend logic (drag/drop, drawer rendering, uploads, admin actions, etc.) —
     only the live-update transport changed, per the plan.
-- [ ] 7. Cron scripts: `scripts/backup.php`, `scripts/workorder_sync.php`, `scripts/reset_password.php`
+- [x] 7. Cron scripts: `public_html/cron/backup.php`, `public_html/cron/workorder_sync.php`,
+  `public_html/cron/reset_password.php` (plus `lib/workorder_mapping.php`, `lib/apps_script_client.php`)
+  - Built under `public_html/cron/` per the plan's directory layout (not a top-level `scripts/`, which is
+    reserved for the archived Node implementation) — the progress checklist's old item-7 title named
+    `scripts/*.php` but the plan body's directory map says `public_html/cron/`; followed the plan body.
+  - **This sandbox turned out to have PHP 8.3 and an installable MariaDB after all** (contrary to the
+    plan's "no local PHP/MySQL" assumption written for earlier items) — `apt-get install -y mariadb-server`
+    worked, and running it with `--skip-grant-tables` gave a real local MySQL-compatible server. Every
+    script in this item was actually executed end-to-end against it (not just read-reviewed): schema
+    creation, seeding users/docs/files/tombstones, running `backup.php`, importing the resulting
+    `dump.sql` into a truncated-but-schema-intact DB and confirming row counts/tombstone/seq round-trip,
+    confirming `doc_seq`'s AUTO_INCREMENT correctly resumes past a restored high-water mark (the exact
+    failure mode `purgeTombstones`'s docblock and this item's backup design worry about), running
+    `workorder_sync.php` against a tiny local PHP server standing in for the Apps Script Web App
+    (including one 302 redirect hop, to exercise `CURLOPT_FOLLOWLOCATION`), verifying per-column rank
+    assignment across multiple columns/priorities, verifying the board-owned-fields-preserved-on-update
+    merge rule, verifying orphan tombstoning when a row disappears from the sheet, verifying the
+    no-op-skip dedup check, verifying the header-mismatch guard throws, and running
+    `reset_password.php`'s usage/weak-password/unknown-user/success paths. If a later item needs local
+    MySQL again: `sudo apt-get install -y mariadb-server`, then
+    `sudo -u mysql mariadbd --skip-grant-tables --socket=/var/run/mysqld/mysqld.sock &`, then connect as
+    `root`/no password over `127.0.0.1`. No test `config.php` or test data/dirs were left committed —
+    both were created under `public_html/` during testing and deleted afterward (confirmed via
+    `git status` showing only the real source files below as untracked/modified).
+  - Added `date_default_timezone_set('UTC')` to the top of `lib/db.php` (before it requires
+    `config.php`) — the plan calls for this explicitly (PHP-on-shared-hosting gotchas section) but no
+    prior item had added it anywhere yet, and this item's date math (`cron/backup.php`'s `date()`-based
+    backup-folder timestamps, `lib/workorder_mapping.php`'s `strtotime()`-based date parsing) is the
+    first code in the port that actually depends on it being UTC rather than the host's default.
+    `lib/db.php` is required (transitively) by `api.php` and every cron script, so this is now set
+    exactly once, early, everywhere.
+  - Added `Q::purgeTombstones(int $beforeMs): int` to `lib/db.php` — the plan asks `cron/backup.php` to
+    purge `docs` tombstones older than ~30 days after each backup completes; this is the first item that
+    needed it, added as a normal `Q` method (raw SQL stays inside `lib/db.php`, not inline in the cron
+    script) rather than a one-off query in `backup.php`.
+  - `lib/workorder_mapping.php` avoids the PHP array-reference pitfall the plan calls out (JS mutates
+    row objects in place via a by-column grouping; PHP arrays are copy-on-write) by grouping *indices*
+    into the single canonical `$parsed` array and writing each row's `rank` back onto `$parsed[$idx]`
+    directly, rather than ever copying row data into a second array — there is only one array holding
+    each row, so there's nothing for the mutation to fail to reach. Verified by hand with multiple rows
+    sharing a column at different priorities (see the MariaDB testing above) rather than just reasoning
+    about it, since this is exactly the kind of bug the plan warned reads clean and only shows up with
+    real multi-row data.
+  - `lib/workorder_mapping.php` also fixes a subtler JS-vs-PHP truthiness gap the plan didn't call out:
+    JS's `if (createdBy)` / `if (deliverable)` / `if (notes)` / `if (closingNotes)` guards are only false
+    on an empty string, but PHP's `if ($x)` on the *string* `"0"` is false (PHP's classic falsy-string
+    quirk) — a sheet cell containing literally `"0"` would then silently drop a note line under a naive
+    port. Replaced each with an explicit `!== ''` check.
+  - `lib/apps_script_client.php` sets `CURLOPT_FOLLOWLOCATION`/`CURLOPT_MAXREDIRS` per the plan's cURL
+    gotcha note (Apps Script Web Apps answer the first hit with a redirect); confirmed with a local
+    stand-in server that actually redirects once before returning JSON, not just by reading the code.
+  - `cron/backup.php` dumps `doc_seq` as a full table (not just `docs`) — its rows are the only thing
+    `docs.seq` values are minted from, and skipping it would let a post-restore `mintSeq()` hand out a
+    seq number that collides with one a restored `docs` row already has. Table dump order
+    (`users, sessions, doc_seq, docs, files, login_attempts`) matters only for `sessions.user_id`'s FK on
+    `users.id`; verified the exact import order round-trips cleanly via `mysql ... < dump.sql`.
+  - `cron/backup.php` treats a value's `NULL` specially (literal `NULL` in the generated SQL) rather
+    than passing it through `PDO::quote()`, since `PDO::quote(null)`'s behavior isn't reliably "emit SQL
+    NULL" across drivers — getting this wrong would turn `docs.data IS NULL` tombstones and nullable
+    `updated_by`/`user_id` columns into empty strings on restore instead of NULL, silently breaking the
+    tombstone contract `lib/db.php` documents.
+  - No `.htaccess` added for `public_html/cron/` or `public_html/private/` in this item — the plan
+    assigns both (root + `private/` + `cron/`, Apache 2.2 and 2.4 deny syntax) to item 8 specifically, so
+    it's deliberately left for whoever builds that item next, not an oversight here.
+  - `config.sample.php` doesn't exist yet (item 8), so `BACKUP_DIR`/`BACKUP_KEEP`/
+    `WORKORDER_APPS_SCRIPT_URL`/`WORKORDER_APPS_SCRIPT_TOKEN`/`WORKORDER_SHEET_NAME`/
+    `WORKORDER_SHEET_RANGE` are all read with the same `defined('X') ? X : default`/"off unless defined"
+    fallback pattern `api.php`'s `upload_dir()`/`max_upload_bytes()` already established for item 5 —
+    whoever builds item 8 should add these as documented, commented-out-by-default constants in
+    `config.sample.php` rather than changing how the cron scripts read them.
 - [ ] 8. `config.sample.php`, `.htaccess` files, deployment README section
 
 Each run: commit with a message naming which numbered item(s) it advanced, push to `claude/php-rewrite`, then update this checklist in the same commit.

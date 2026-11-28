@@ -92,7 +92,31 @@ run will redo/finish it rather than skipping ahead.
   - `upload_dir()`/`max_upload_bytes()` (top of `api.php`) read `UPLOAD_DIR`/`MAX_UPLOAD_MB` constants with
     fallback defaults (`public_html/private/uploads`, 25MB) since `config.php` doesn't exist until item 8 —
     once it does, define those constants there rather than changing these functions.
-- [ ] 6. `public_html/index.html`: swap EventSource for polling (`/api/changes?since=`)
+- [x] 6. `public_html/index.html`: swap EventSource for polling (`/api/changes?since=`)
+  - Copied `public/index.html` from `archive/node-event-board` into `public_html/index.html` verbatim,
+    then replaced only `connectLive()`/`resync()` — a `git diff --no-index` against the archive file
+    confirms that's the only change (matches the plan's "~5% changed" scope).
+  - New `connectLive(cursor)` seeds `pollCursor` from the caller's argument (the main IIFE now calls
+    `connectLive(s.cursor)` using `/api/state`'s `cursor` field, not `0` or `serverTime`, per the plan).
+    `pollTick()` then calls `GET /api/changes?since=<pollCursor>` on a 3s `setTimeout` loop (not
+    `setInterval`, so a slow response can't pile up overlapping requests), advances `pollCursor` from
+    each response's own `cursor`, and feeds every returned doc straight into `db.apply(d.col,d.id,d.data)`
+    — `data` is already `null` for a tombstone (deleted doc), so no separate `deleted` flag is needed,
+    unlike the old `{type:'doc',deleted:true}` SSE message shape.
+  - Users: every `/api/changes` response already carries a fresh full user list (server-side, nothing
+    new needed there per item 4's note). To avoid an unconditional full `renderMain()`/`renderDrawer()`
+    every 3s even when nothing changed (the old SSE push only fired on an actual user-list change),
+    `pollTick()` keeps a `usersSnapshot` JSON string and only reassigns `users`/`me` and calls `refresh()`
+    when it differs from the previous tick's. Doc changes don't need this treatment: `db.apply()` already
+    only notifies the `onSnapshot` listeners registered in the main IIFE's `sub()` calls, which is exactly
+    what triggered `refresh()` before, so an empty `docs` array in a poll response naturally triggers
+    nothing extra.
+  - Error handling mirrors the old `es.onerror`/`es.onopen` pair as closely as polling allows: a failed
+    poll schedules `offline=true` (and a `/api/status` signed-out check) after a 5s debounce exactly like
+    before, cleared on the next successful poll; a 401 (already turned into `signedOut()` by `API.req`
+    itself) just returns without scheduling another poll, since the page is about to reload anyway.
+  - Did not touch any other frontend logic (drag/drop, drawer rendering, uploads, admin actions, etc.) —
+    only the live-update transport changed, per the plan.
 - [ ] 7. Cron scripts: `scripts/backup.php`, `scripts/workorder_sync.php`, `scripts/reset_password.php`
 - [ ] 8. `config.sample.php`, `.htaccess` files, deployment README section
 
